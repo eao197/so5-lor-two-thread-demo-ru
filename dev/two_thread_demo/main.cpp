@@ -11,7 +11,7 @@ struct write_data {
 // Нить чтения данных с датчика.
 void meter_reader_thread(
 		// Канал, который нужен этой нити.
-		so_5::mchain_t self_ch,
+		so_5::mchain_t timer_ch,
 		// Канал, в который будут отсылаться команды на запись файла.
 		so_5::mchain_t file_write_ch) {
 
@@ -22,11 +22,11 @@ void meter_reader_thread(
 	int ordinal = 0;
 
 	// Запускаем таймер.
-	auto timer = so_5::send_periodic<acquisition_turn>(self_ch, 0ms, 750ms);
+	auto timer = so_5::send_periodic<acquisition_turn>(timer_ch, 0ms, 750ms);
 
 	// Читаем все из канала до тех пор, пока канал не закроют.
 	// В этом случае произойдет автоматический выход из receive.
-	receive(from(self_ch),
+	receive(from(timer_ch),
 			// Этот обработчик будет вызван когда в канал попадет
 			// сигнал типа acquire_turn.
 			[&](so_5::mhood_t<acquisition_turn>) {
@@ -72,15 +72,15 @@ int main() {
 	auto joiner = so_5::auto_join(meter_reader, file_writer);
 
 	// Создаем каналы, которые потребуются нашим рабочим нитям.
-	auto meter_ch = so_5::create_mchain(sobj);
+	auto timer_ch = so_5::create_mchain(sobj);
 	auto writer_ch = so_5::create_mchain(sobj);
 	// Каналы должны быть автоматически закрыты при выходе из main.
 	// Если этого не сделать, то рабочие нити продолжат висеть внутри
 	// receive() и join() для них не завершится.
-	auto closer = so_5::auto_close_drop_content(meter_ch, writer_ch);
+	auto closer = so_5::auto_close_drop_content(timer_ch, writer_ch);
 
 	// Теперь можно стартовать наши рабочие нити.
-	meter_reader = std::thread(meter_reader_thread, meter_ch, writer_ch);
+	meter_reader = std::thread(meter_reader_thread, timer_ch, writer_ch);
 	file_writer = std::thread(file_writer_thread, writer_ch);
 
 	// Программа продолжит работать пока пользователь не введет exit или
