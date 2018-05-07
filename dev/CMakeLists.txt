@@ -7,4 +7,6 @@ set(SOBJECTIZER_BUILD_STATIC ON)
 
 add_subdirectory(so_5)
 add_subdirectory(two_thread_demo)
+add_subdirectory(two_thread_demo_2)
+add_subdirectory(two_thread_demo_3)
 
