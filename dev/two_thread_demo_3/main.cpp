@@ -28,6 +28,8 @@ std::chrono::milliseconds to_ms(std::chrono::duration<R, P> v) {
 void meter_reader_thread(
 		// Канал, который нужен для управления этой нитью.
 		so_5::mchain_t control_ch,
+		// Канал для сигналов acquisition_turn.
+		so_5::mchain_t timer_ch,
 		// Канал, в который будут отсылаться команды на запись файла.
 		so_5::mchain_t file_write_ch) {
 
@@ -41,29 +43,14 @@ void meter_reader_thread(
 	// Тип для периодического сигнала от таймера.
 	struct acquisition_turn : public so_5::signal_t {};
 
-	// Канал, который будет использоваться для отсылки acquisition_turn.
-	auto timer_ch = so_5::create_mchain(control_ch->environment(),
-			// Отводим место всего под одно сообщение.
-			1,
-			// Память под mchain выделяем сразу.
-			so_5::mchain_props::memory_usage_t::preallocated,
-			// Если место в mchain-е не освободилось даже после ожидания,
-			// то игнорируем самое новое сообщение.
-			so_5::mchain_props::overflow_reaction_t::drop_newest);
-
 	// Просто счетчик чтений. Нужен для генерации новых имен файлов.
 	int ordinal = 0;
 
 	// Сразу же отсылаем себе первый сигнал на чтение данных.
 	so_5::send<acquisition_turn>(timer_ch);
 
-	// Читаем все из канала до тех пор, пока управляющий канал не закроют.
-	bool control_ch_closed = false;
-	so_5::select(
-		// Описываем условия выхода из select-а.
-		so_5::from_all()
-			.stop_on([&]{ return control_ch_closed; })
-			.on_close([&](auto) { control_ch_closed = true; }),
+	// Читаем все из канала до тех пор, пока каналы не закроют.
+	so_5::select(so_5::from_all(),
 		// Обработчик для сигналов от таймера.
 		case_(timer_ch,
 			// Этот обработчик будет вызван когда в канал попадет
@@ -156,6 +143,15 @@ int main() {
 	// Создаем каналы, которые потребуются нашим рабочим нитям.
 	// Управляющий канал для meter_reader_thread. Без каких-либо ограничений.
 	auto control_ch = so_5::create_mchain(sobj);
+	// Канал, который будет использоваться для отсылки acquisition_turn.
+	auto timer_ch = so_5::create_mchain(control_ch->environment(),
+			// Отводим место всего под одно сообщение.
+			1,
+			// Память под mchain выделяем сразу.
+			so_5::mchain_props::memory_usage_t::preallocated,
+			// Если место в mchain-е не освободилось даже после ожидания,
+			// то игнорируем самое новое сообщение.
+			so_5::mchain_props::overflow_reaction_t::drop_newest);
 	// Канал для записи измерений будет ограничен по размеру, с паузой
 	// при попытке записать в полный mchain и с выбрасыванием самых старых
 	// команд, если канал даже после паузы не освободился.
@@ -172,10 +168,10 @@ int main() {
 	// Каналы должны быть автоматически закрыты при выходе из main.
 	// Если этого не сделать, то рабочие нити продолжат висеть внутри
 	// receive() и join() для них не завершится.
-	auto closer = so_5::auto_close_drop_content(control_ch, writer_ch);
+	auto closer = so_5::auto_close_drop_content(control_ch, timer_ch, writer_ch);
 
 	// Теперь можно стартовать наши рабочие нити.
-	meter_reader = std::thread(meter_reader_thread, control_ch, writer_ch);
+	meter_reader = std::thread(meter_reader_thread, control_ch, timer_ch, writer_ch);
 	file_writer = std::thread(file_writer_thread, writer_ch);
 
 	// Программа продолжит работать пока пользователь не введет exit или
