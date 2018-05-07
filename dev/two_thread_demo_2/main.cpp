@@ -61,8 +61,9 @@ void file_writer_thread(
 			// Этот обработчик будет вызван когда в канал попадет
 			// сообщение типа write_data.
 			[&](so_5::mhood_t<write_data> cmd) {
-				// Имитируем запись в файл.
+				// Выбираем случайную длительность операции "записи".
 				const auto pause = rd_dist(rd_gen);
+				// Имитируем запись в файл.
 				std::cout << cmd->file_name_ << ": write started (pause:"
 						<< pause << "ms)" << std::endl;
 				std::this_thread::sleep_for(std::chrono::milliseconds{pause});
@@ -83,7 +84,17 @@ int main() {
 	auto joiner = so_5::auto_join(meter_reader, file_writer);
 
 	// Создаем каналы, которые потребуются нашим рабочим нитям.
-	auto meter_ch = so_5::create_mchain(sobj);
+	// Канал для периодических сигналов будет ограничен по размеру,
+	// без паузы при попытке записать в полный mchain и с выбрасыванием
+	// самых новых сообщений.
+	auto meter_ch = so_5::create_mchain(sobj,
+			// Отводим место всего под одно сообщение.
+			1,
+			// Память под mchain выделяем сразу.
+			so_5::mchain_props::memory_usage_t::preallocated,
+			// Если место в mchain-е не освободилось даже после ожидания,
+			// то игнорируем самое новое сообщение.
+			so_5::mchain_props::overflow_reaction_t::drop_newest);
 	// Канал для записи измерений будет ограничен по размеру, с паузой
 	// при попытке записать в полный mchain и с выбрасыванием самых старых
 	// команд, если канал даже после паузы не освободился.
@@ -93,7 +104,7 @@ int main() {
 			// Ждать в mchain-е могут не более 2-х сообщений.
 			2,
 			// Память под mchain выделяем сразу.
-			so_5::mchain_props::memory_usage_t::dynamic,
+			so_5::mchain_props::memory_usage_t::preallocated,
 			// Если место в mchain-е не освободилось даже после ожидания,
 			// то выбрасываем самое старое сообщение из mchain-а.
 			so_5::mchain_props::overflow_reaction_t::remove_oldest);
