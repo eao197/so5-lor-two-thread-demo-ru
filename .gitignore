@@ -1,13 +1,7 @@
 syntax: glob
 
-cmake_build
-.externals
+cmake_build*
 *.swp
 *.log
-dev/target
-dev/so_5
-dev/timertt
-dev/__*.vim
 *.sublime-project
 *.sublime-workspace
-dev/local-build.rb

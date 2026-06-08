@@ -10,12 +10,35 @@ struct write_data {
 	const std::string file_name_;
 };
 
+// Сигнал, который отсылается нити чтения данных с датчика для
+// уменьшения периода опроса.
+struct dec_read_period : public so_5::signal_t {};
+
+// Сигнал, который отсылается нити чтения данных с датчика для
+// увеличения периода опроса.
+struct inc_read_period : public so_5::signal_t {};
+
+// Вспомогательная функция для конвертирования duration в ms.
+template<typename R, typename P>
+std::chrono::milliseconds to_ms(std::chrono::duration<R, P> v) {
+	return std::chrono::duration_cast<std::chrono::milliseconds>(v);
+}
+
 // Нить чтения данных с датчика.
 void meter_reader_thread(
-		// Канал, который нужен этой нити.
+		// Канал, который нужен для управления этой нитью.
+		so_5::mchain_t control_ch,
+		// Канал для сигналов acquisition_turn.
 		so_5::mchain_t timer_ch,
 		// Канал, в который будут отсылаться команды на запись файла.
 		so_5::mchain_t file_write_ch) {
+
+	// Границы для допустимого времени опроса.
+	const auto period_left_range = to_ms(50ms);
+	const auto period_right_range = to_ms(2s);
+
+	// Текущий темп опроса.
+	auto current_period = to_ms(300ms);
 
 	// Тип для периодического сигнала от таймера.
 	struct acquisition_turn : public so_5::signal_t {};
@@ -23,16 +46,20 @@ void meter_reader_thread(
 	// Просто счетчик чтений. Нужен для генерации новых имен файлов.
 	int ordinal = 0;
 
-	// Запускаем таймер.
-	// В этой версии у нас таймер срабатывает гораздо чаще.
-	auto timer = so_5::send_periodic<acquisition_turn>(timer_ch, 0ms, 300ms);
+	// Сразу же отсылаем себе первый сигнал на чтение данных.
+	so_5::send<acquisition_turn>(timer_ch);
 
-	// Читаем все из канала до тех пор, пока канал не закроют.
-	// В этом случае произойдет автоматический выход из receive.
-	receive(from(timer_ch),
+	// Читаем все из каналов до тех пор, пока каналы не закроют.
+	so_5::select(so_5::from_all().handle_all(),
+		// Обработчик для сигналов от таймера.
+		receive_case(timer_ch,
 			// Этот обработчик будет вызван когда в канал попадет
 			// сигнал типа acquire_turn.
 			[&](so_5::mhood_t<acquisition_turn>) {
+				// Нам потребуется узнать, сколько времени мы потратили на
+				// всю операцию. Поэтому делаем засечку.
+				const auto started_at = std::chrono::steady_clock::now();
+
 				// Имитируем опрос датчика.
 				std::cout << "meter read started" << std::endl;
 				std::this_thread::sleep_for(50ms);
@@ -42,7 +69,37 @@ void meter_reader_thread(
 				so_5::send<write_data>(file_write_ch,
 						"data_" + std::to_string(ordinal) + ".dat");
 				++ordinal;
-			});
+
+				// Теперь можем вычислить сколько же всего времени было
+				// потрачено.
+				const auto duration = std::chrono::steady_clock::now() - started_at;
+				// Если потратили слишком много, то инициируем следующий
+				// опрос сразу же.
+				if(duration >= current_period) {
+					std::cout << "period=" << current_period.count()
+							<< "ms, no sleep" << std::endl;
+					so_5::send<acquisition_turn>(timer_ch);
+				}
+				else {
+					// В противном случае можем позволить себе немного "поспать".
+					const auto sleep_time = to_ms(current_period - duration);
+					std::cout << "period=" << current_period.count() << "ms, sleep="
+							<< sleep_time.count() << "ms" << std::endl;
+					so_5::send_delayed<acquisition_turn>(timer_ch,
+							current_period - duration);
+				}
+			}),
+		// Обработчик сигналов из управляющего канала.
+		receive_case(control_ch,
+			// Обрабатываем увеличение интервала опроса.
+			[&](so_5::mhood_t<inc_read_period>) {
+				current_period = std::min(to_ms(current_period * 1.5), period_right_range);
+			},
+			// Обрабатываем уменьшение интервала опроса.
+			[&](so_5::mhood_t<dec_read_period>) {
+				current_period = std::max(to_ms(current_period / 1.5), period_left_range);
+			})
+	);
 }
 
 // Нить, которая будет записывать файлы.
@@ -57,7 +114,7 @@ void file_writer_thread(
 
 	// Читаем все из канала до тех пор, пока канал не закроют.
 	// В этом случае произойдет автоматический выход из receive.
-	receive(from(file_write_ch),
+	receive(from(file_write_ch).handle_all(),
 			// Этот обработчик будет вызван когда в канал попадет
 			// сообщение типа write_data.
 			[&](so_5::mhood_t<write_data> cmd) {
@@ -84,10 +141,10 @@ int main() {
 	auto joiner = so_5::auto_join(meter_reader, file_writer);
 
 	// Создаем каналы, которые потребуются нашим рабочим нитям.
-	// Канал для периодических сигналов будет ограничен по размеру,
-	// без паузы при попытке записать в полный mchain и с выбрасыванием
-	// самых новых сообщений.
-	auto timer_ch = so_5::create_mchain(sobj,
+	// Управляющий канал для meter_reader_thread. Без каких-либо ограничений.
+	auto control_ch = so_5::create_mchain(sobj);
+	// Канал, который будет использоваться для отсылки acquisition_turn.
+	auto timer_ch = so_5::create_mchain(control_ch->environment(),
 			// Отводим место всего под одно сообщение.
 			1,
 			// Память под mchain выделяем сразу.
@@ -110,22 +167,29 @@ int main() {
 	// Каналы должны быть автоматически закрыты при выходе из main.
 	// Если этого не сделать, то рабочие нити продолжат висеть внутри
 	// receive() и join() для них не завершится.
-	auto closer = so_5::auto_close_drop_content(timer_ch, writer_ch);
+	auto closer = so_5::auto_close_drop_content(control_ch, timer_ch, writer_ch);
 
 	// Теперь можно стартовать наши рабочие нити.
-	meter_reader = std::thread(meter_reader_thread, timer_ch, writer_ch);
+	meter_reader = std::thread(meter_reader_thread, control_ch, timer_ch, writer_ch);
 	file_writer = std::thread(file_writer_thread, writer_ch);
 
 	// Программа продолжит работать пока пользователь не введет exit или
 	// пока не закроет стандартный поток ввода.
-	std::cout << "Type 'exit' to quit:" << std::endl;
+	bool stop_execution = false;
+	while(!stop_execution) {
+		std::cout << "Type 'exit' to quit, 'inc' or 'dec':" << std::endl;
 
-	std::string cmd;
-	while(std::getline(std::cin, cmd)) {
-		if("exit" == cmd)
-			break;
+		std::string cmd;
+		if(std::getline(std::cin, cmd)) {
+			if("exit" == cmd)
+				stop_execution = true;
+			else if("inc" == cmd)
+				so_5::send<inc_read_period>(control_ch);
+			else if("dec" == cmd)
+				so_5::send<dec_read_period>(control_ch);
+		}
 		else
-			std::cout << "Type 'exit' to quit" << std::endl;
+			stop_execution = true;
 	}
 
 	// Просто завершаем main. Все каналы будут закрыты автоматически
